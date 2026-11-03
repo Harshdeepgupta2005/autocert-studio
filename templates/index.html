@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoCert Studio — Certificates & ID cards from Excel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎓</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ══════════════════════ TOP BAR ══════════════════════ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">🎓</div>
+    <div>
+      <h1>AutoCert Studio</h1>
+      <p>Design once → generate hundreds from Excel</p>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn dark" id="btnDemo" title="Load a working example with sample data">▶ Demo</button>
+    <button class="btn dark" id="btnHelp" title="Show the quick guide again">? Guide</button>
+    <button class="btn dark" id="btnProjects" title="Open a previously saved layout">📂 Projects</button>
+    <button class="btn dark" id="btnSave" title="Save the current layout to reuse later">💾 Save</button>
+    <button class="btn dark" id="btnNew" title="Start over with an empty project">＋ New</button>
+    <button class="btn primary" id="btnGenerate" title="Create one card per Excel row">⚡ Generate all</button>
+  </div>
+</header>
+
+<!-- ══════════════════════ MAIN ══════════════════════ -->
+<main>
+
+  <!-- ─────────────── LEFT: setup steps ─────────────── -->
+  <aside id="setupPanel">
+
+    <section class="card step-card" id="cardTemplate">
+      <h3><span class="step">1</span> <span class="tile">🖼️</span> Design image
+          <span class="status" id="statusTemplate">not loaded</span></h3>
+      <div class="drop" id="dropTemplate">
+        <input type="file" id="fileTemplate" accept=".png,.jpg,.jpeg,.webp" hidden>
+        <div class="dropIcon">🖼️</div>
+        <p><b>Upload your design</b><br>PNG or JPG · click or drag here</p>
+      </div>
+      <div class="hint">Export your certificate / ID card as an image. All fixed parts (logo, borders, titles) stay baked into the image — only the changing data goes on top.</div>
+    </section>
+
+    <section class="card step-card" id="cardExcel">
+      <h3><span class="step">2</span> <span class="tile">📊</span> Excel list
+          <span class="status" id="statusExcel">not loaded</span></h3>
+      <div class="drop" id="dropExcel">
+        <input type="file" id="fileExcel" accept=".xlsx,.xlsm,.csv" hidden>
+        <div class="dropIcon">📊</div>
+        <p><b>Upload your list</b><br>.xlsx or .csv · first row = column names</p>
+      </div>
+      <div class="hint" id="excelInfo">Example columns: <b>Full Name, ID Number, Course, Issue Date, Photo</b>. <a href="/api/sample-excel">⬇ Get a sample Excel</a></div>
+    </section>
+
+    <section class="card step-card" id="cardFields">
+      <h3><span class="step">3</span> <span class="tile">✨</span> Place fields on the design
+          <span class="status" id="statusFields">0 placed</span></h3>
+      <div class="addRow" id="addBtns">
+        <button class="btn ghost modeBtn" id="btnAddText" title="Add a text that changes per person (name, ID, date…)">
+          <span class="abIcon">🔤</span> Text field</button>
+        <button class="btn ghost modeBtn" id="btnAddPhoto" title="Add a box where each person's photo goes">
+          <span class="abIcon">📷</span> Photo box</button>
+      </div>
+      <div class="hint addHelp">After clicking a button above, <b>click the place on the design</b> on the right. Then edit its settings below.</div>
+      <ul id="fieldList"></ul>
+      <div class="hint" id="fieldsHint">No fields yet. Add a text field, then click on the design where it belongs. Drag fields to move them.</div>
+    </section>
+
+    <section class="card" id="propsCard">
+      <h3><span class="step plain">✎</span> Field properties</h3>
+      <div id="props"><p class="none">Select a field on the design (or in the list above) to edit it here.</p></div>
+    </section>
+
+    <section class="card" id="cardOptional">
+      <h3><span class="step">4</span> <span class="tile">📷</span> Photos folder
+          <span class="status" id="statusPhotos">optional</span></h3>
+      <div class="inputRow">
+        <input type="text" id="photosFolder" placeholder="e.g. /Users/you/Desktop/photos" spellcheck="false">
+        <button class="btn mini" id="btnBrowsePhotos" title="Choose the folder (in desktop app)">📁 Browse</button>
+      </div>
+      <div class="hint">Needed <b>only if</b> you added photo boxes. In the desktop app use “📁 Browse”. In browser mode: right-click your folder in Finder, hold <b>⌥ Option</b>, choose “Copy as Pathname”, paste here. Full file paths inside the Excel “Photo” column also work.</div>
+    </section>
+
+    <section class="card" id="cardExport">
+      <h3><span class="step">5</span> <span class="tile">🗂️</span> Export options</h3>
+      <div class="propGrid">
+        <label>File names taken from
+          <select id="selFname"></select>
+        </label>
+        <label>File-name prefix (optional)
+          <input type="text" id="inPrefix" placeholder="e.g. Certificate_">
+        </label>
+        <label>PDF page size
+          <select id="selPdf">
+            <option value="fit" selected>Fit to design size (full bleed)</option>
+            <option value="a4l">A4 Landscape</option>
+            <option value="a4p">A4 Portrait</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="card genCard">
+      <h3>🚀 Ready to generate?</h3>
+      <ul class="checklist">
+        <li id="chkTemplate"><span class="st"></span><span class="tx">Design image uploaded</span></li>
+        <li id="chkExcel"><span class="st"></span><span class="tx">Excel list uploaded</span></li>
+        <li id="chkFields"><span class="st"></span><span class="tx">At least one field placed</span></li>
+      </ul>
+      <button id="btnGenerate2" class="btn primary big">⚡ Generate all cards</button>
+      <div class="hint">Creates <b>one PNG per row</b> (named from your chosen column), plus <b>combined.pdf</b> and a ZIP — the results folder opens automatically.</div>
+    </section>
+
+  </aside>
+
+  <!-- ─────────────── RIGHT: workspace ─────────────── -->
+  <section id="workspace">
+
+    <div id="emptyState">
+      <div class="hero">
+        <div class="heroEmoji">🎉</div>
+        <h2>Your automation is <em>one screen</em> away</h2>
+        <p>Upload your certificate / ID design on the left, upload the Excel list of names, click where each data item goes — then generate them all at once.</p>
+        <div class="heroSteps">
+          <div class="hs"><b>1</b> Upload design</div>
+          <div class="hs"><b>2</b> Upload Excel</div>
+          <div class="hs"><b>3</b> Click to place fields</div>
+          <div class="hs"><b>4</b> Generate all</div>
+        </div>
+        <div class="heroBtns">
+          <button class="btn primary" id="heroUploadDesign">🖼️ Upload my design</button>
+          <button class="btn" id="heroDemo">▶ Try the demo project</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="canvasWrap" hidden>
+      <div class="canvasCol card editor">
+        <div class="bar">
+          <span class="barTitle">🎨 Design canvas</span>
+          <span class="barInfo" id="canvasInfo"></span>
+          <span class="barNote" id="navHint">Click to select · drag to move · ⌫ delete · arrows nudge</span>
+        </div>
+        <div id="imgScroll">
+          <div id="imgBox">
+            <img id="tplImg" alt="design template">
+            <div id="overlays"></div>
+          </div>
+        </div>
+        <div id="hintBar" hidden></div>
+      </div>
+
+      <div class="previewCol card">
+        <div class="bar">
+          <span class="barTitle">👁 Live preview</span>
+          <span class="rowCtl">
+            <button class="btn mini" id="rowPrev" title="Previous row" aria-label="Previous row">‹</button>
+            <input type="number" id="previewRow" value="1" min="1" title="Row to preview" aria-label="Row to preview">
+            <button class="btn mini" id="rowNext" title="Next row" aria-label="Next row">›</button>
+            <span class="of">of <b id="rowCountText">–</b></span>
+            <button class="btn mini" id="btnRefreshPrev" title="Refresh preview" aria-label="Refresh preview">↻</button>
+          </span>
+        </div>
+        <div id="previewBox">
+          <img id="prevImg" alt="preview" hidden>
+          <p id="prevEmpty">Load a design + Excel —<br>your preview appears here.<br><span class="small">It is exactly how the final file looks.</span></p>
+        </div>
+        <label class="chk"><input type="checkbox" id="autoPrev" checked> Update preview automatically while I edit</label>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ══════════════════════ PROGRESS FOOTER ══════════════════════ -->
+<footer id="progWrap" hidden>
+  <div class="progInner">
+    <div id="progLabel">⏳ Generating…</div>
+    <div id="progTrack"><div id="progBar"></div></div>
+    <div id="progText"></div>
+    <div id="progResult"></div>
+  </div>
+</footer>
+
+<!-- ══════════════════════ MODALS ══════════════════════ -->
+<div id="modal" class="hidden">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Saved projects">
+    <div class="sheetHead"><b>📂 Saved projects</b><button class="btn mini" id="btnCloseModal" title="Close" aria-label="Close">✕</button></div>
+    <div id="projectList"></div>
+  </div>
+</div>
+
+<div id="welcome" class="hidden">
+  <div class="sheet welcomeSheet" role="dialog" aria-modal="true" aria-label="Welcome guide">
+    <div class="wHead"><div class="wLogo">🎓</div>
+      <div><h2>Welcome to AutoCert Studio</h2>
+      <p>Turn one design + one Excel sheet into hundreds of certificates & ID cards — automatically.</p></div>
+    </div>
+    <div class="wSteps">
+      <div class="wStep"><span>1</span><b>🖼️ Upload design</b><p>Your PNG/JPG certificate or ID card design.</p></div>
+      <div class="wStep"><span>2</span><b>📊 Upload Excel</b><p>Names & data, first row as column titles.</p></div>
+      <div class="wStep"><span>3</span><b>👆 Click to place</b><p>Click the design where each field must appear; pick its column.</p></div>
+      <div class="wStep"><span>4</span><b>⚡ Generate</b><p>One PNG per person + combined PDF, in one folder.</p></div>
+    </div>
+    <div class="wBtns">
+      <button class="btn primary" id="btnWelcomeDemo">▶ Show me with the demo</button>
+      <button class="btn" id="btnWelcomeStart">Start with my own design →</button>
+    </div>
+    <p class="wFoot">100% local — nothing leaves your computer. Reopen this guide anytime with “? Guide”.</p>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

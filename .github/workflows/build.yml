@@ -1,0 +1,105 @@
+# AutoCert Studio — automatic release builds
+#
+# Produces installers for both platforms:
+#   Windows  →  AutoCertStudio-Setup-<version>.exe
+#   macOS    →  AutoCertStudio-<arch>-<version>.dmg   (arm64 + x64)
+#
+# Runs:
+#   • automatically when you push a tag like v1.0.1
+#   • on demand via the "Run workflow" button on GitHub
+#
+# Artifacts appear on the run page; pull requests also attach them.
+
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+jobs:
+  windows:
+    name: Windows .exe installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the Python engine
+        run: |
+          python -m pip install -r requirements.txt pyinstaller
+          python -m PyInstaller --onedir --noconfirm --name engine `
+            --add-data "templates;templates" `
+            --add-data "static;static" `
+            app.py
+        shell: pwsh
+
+      - name: Stage engine into electron/
+        run: |
+          Remove-Item electron\engine -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\engine electron\engine -Recurse
+        shell: pwsh
+
+      - name: Build the installer
+        run: |
+          npm install --no-fund --no-audit
+          npx electron-builder --win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        working-directory: electron
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoCertStudio-Windows
+          path: electron/dist/*.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS .dmg (arm64 + x64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the Python engine
+        run: |
+          python -m pip install -r requirements.txt pyinstaller
+          python -m PyInstaller --onedir --noconfirm --name engine \
+            --add-data "templates:templates" \
+            --add-data "static:static" \
+            app.py
+
+      - name: Stage engine into electron/
+        run: |
+          rm -rf electron/engine
+          cp -R dist/engine electron/engine
+
+      - name: Build the DMGs
+        run: |
+          npm install --no-fund --no-audit
+          npx electron-builder --mac dmg
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        working-directory: electron
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoCertStudio-macOS
+          path: |
+            electron/dist/*.dmg
+          if-no-files-found: error

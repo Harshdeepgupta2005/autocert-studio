@@ -1,0 +1,34 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# ── Node / Electron ──
+# node_modules and offline Electron staging are re-fetched / rebuilt
+node_modules/
+electron/node_modules/
+electron/dist/
+electron/vendor/
+# staged PyInstaller engine (rebuilt per PACKAGING.md)
+electron/engine/
+# generated app icons — run gen_icons.py to recreate
+electron/build/
+
+# ── Build artifacts ──
+build-engine/
+*.dmg
+*.exe
+
+# ── Runtime data (lives in the OS data folder for the installed app) ──
+uploads/
+output/
+projects/
+demo/
+fonts/
+selftest_output/
+server.log
+
+# ── OS noise ──
+.DS_Store
+Thumbs.db
