@@ -83,6 +83,7 @@ environment). Your browser opens at `http://localhost:7437`.
 venv/bin/python selftest.py      # headless render test → selftest_output/
 start.command                    # runs app.py (Flask, port 7437+, auto-browser)
 npm start                        # in electron/ → run Electron in dev mode
+build_mac.sh                     # full macOS .dmg build in one command
 uploads/  projects/  output/     # data folders (project folder in browser mode)
 PACKAGING.md                     # how to build the .exe / .dmg installers
 ```

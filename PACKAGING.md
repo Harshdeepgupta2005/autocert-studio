@@ -46,11 +46,19 @@ How the desktop app is assembled and how to produce the installers
 | `electron/vendor/`           | offline Electron for mac builds that fail the    |
 |                              | download (`--config.electronDist=vendor`)        |
 | `build_windows.bat`          | one-shot builder for a Windows PC                |
+| `build_mac.sh`               | one-shot builder for a Mac (Apple Silicon)       |
 | `.github/workflows/build.yml`| cloud builder for both platforms                 |
+
+# ────────────────────────────────────────────────────────────────
+# `build_mac.sh` and `build_windows.bat` run all of the steps below  
+# on their machine with one double-click / command.
+# ────────────────────────────────────────────────────────────────
 
 ## Build a macOS `.dmg` (on this Mac)
 
 ```bash
+./build_mac.sh          # or run the three steps below by hand
+
 # 1. build the frozen engine
 cd build-engine
 ../venv/bin/pyinstaller --onedir --noconfirm --name engine \
@@ -129,6 +137,10 @@ dist/mac-arm64/AutoCert\ Studio.app/Contents/Resources/engine/engine \
 
 # run the packaged app and capture a screenshot of the window
 AUTOCERT_CAPTURE=/tmp/shot.png \
+  dist/mac-arm64/AutoCert\ Studio.app/Contents/MacOS/AutoCert\ Studio
+
+# same, but load the built-in demo project first (canvas + preview shot)
+AUTOCERT_CAPTURE=/tmp/shot.png AUTOCERT_DEMO=1 \
   dist/mac-arm64/AutoCert\ Studio.app/Contents/MacOS/AutoCert\ Studio
 ```
 
