@@ -40,6 +40,22 @@ def main() -> int:
     renderer.build_pdf(pngs[:2], str(pdf2), "a4l")
     print(f"PDF (A4L): {pdf2} ({pdf2.stat().st_size//1024} KB)")
 
+    # fancy photo: circle + background removal (exercises the shaping path)
+    import copy
+    fancy = copy.deepcopy(cfg)
+    for f in fancy["fields"]:
+        if f.get("type") == "photo":
+            f.update(shape="circle", bg_remove=True, bg_tol=60)
+    m = renderer.layout_text("Aarav Sharma", {"font": "Arial", "size": 42})
+    print(f"metrics check: {m['width']}×{m['height']}")
+    assert m["width"] > 100 and m["height"] > 20
+    img = renderer.render_card(assets["template"], fancy, rows[0],
+                               photos_folder=assets["photos_dir"],
+                               excel_dir=assets["excel_dir"])
+    p = OUT / "test_fancy_circle_bg_removed.png"
+    img.save(p, "PNG")
+    print(f"fancy photo -> {p.name}")
+
     print("SELFTEST OK")
     return 0
 

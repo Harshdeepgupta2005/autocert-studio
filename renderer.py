@@ -8,10 +8,11 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import sys
+from collections import deque
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from app_config import FONTS_DIR
 
@@ -57,7 +58,7 @@ def _font_index() -> dict[str, Path]:
 
 @lru_cache(maxsize=1)
 def font_list() -> list[tuple[str, str]]:
-    """Sorted (display_label, path) for the font dropdown."""
+    """Sorted (display_label, path) for the font picker."""
     pairs = [
         (p.stem.replace("_", " ").strip(), str(p))
         for p in _font_index().values()
@@ -78,6 +79,13 @@ def font_list() -> list[tuple[str, str]]:
 
 def font_labels() -> list[str]:
     return [label for label, _path in font_list()]
+
+
+def refresh_fonts() -> None:
+    """Re-scan every font folder (call after fonts are imported or removed)."""
+    _font_index.cache_clear()
+    font_list.cache_clear()
+    get_font.cache_clear()
 
 
 def _match_font(label: str) -> Path | None:
@@ -110,6 +118,12 @@ def get_font(label: str, size: int):
             except Exception:
                 continue
     return ImageFont.load_default(size)
+
+
+def font_path(label: str) -> str | None:
+    """Resolve a font display label to its file path (None if unknown)."""
+    p = _match_font(label)
+    return str(p) if p else None
 
 
 # ----------------------------------------------------------------- data ----
@@ -178,20 +192,18 @@ def _wrap_lines(draw, text: str, font, max_width: int) -> list[str]:
     return lines
 
 
-# ----------------------------------------------------------------- draw ----
+def layout_text(text: str, field: dict) -> dict:
+    """Measure how a text block will be drawn, without painting it.
 
-def _draw_text(base, draw, field: dict, row: dict) -> None:
-    txt = compose_text(field, row)
-    if not txt:
-        return
+    Returns {lines, width, height, line_h} with exactly the geometry
+    _draw_text uses, so the UI can place a true bounding box around text.
+    """
     font = get_font(field.get("font") or "", int(field.get("size") or 40))
     wrap = int(field.get("wrap_width") or 0)
-    lines = _wrap_lines(draw, txt, font, wrap)
-
-    align = field.get("align") or "center"
-    valign = field.get("valign") or ("top" if wrap else "center")
-    x, y = float(field.get("x", 0)), float(field.get("y", 0))
-    color = field.get("color") or "#111111"
+    dummy = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+    lines = _wrap_lines(dummy, text, font, wrap)
+    if not lines:
+        return {"lines": [], "width": 0, "height": 0, "line_h": 0}
 
     ascent, descent = font.getmetrics()
     line_h = ascent + descent
@@ -200,7 +212,30 @@ def _draw_text(base, draw, field: dict, row: dict) -> None:
         line_gap = int(field.get("line_spacing") or 8)
     else:
         line_gap = int(field.get("line_spacing") or max(4, round(0.15 * line_h)))
-    total_h = n * line_h + line_gap * (n - 1)
+    width = max(round(dummy.textlength(ln, font=font)) for ln in lines)
+    height = n * line_h + line_gap * (n - 1)
+    return {"lines": lines, "width": width, "height": height, "line_h": line_h}
+
+
+# ----------------------------------------------------------------- draw ----
+
+def _draw_text(base, draw, field: dict, row: dict) -> None:
+    txt = compose_text(field, row)
+    if not txt:
+        return
+    metrics = layout_text(txt, field)
+    lines = metrics["lines"]
+    font = get_font(field.get("font") or "", int(field.get("size") or 40))
+
+    align = field.get("align") or "center"
+    valign = field.get("valign") or ("top" if int(field.get("wrap_width") or 0) else "center")
+    x, y = float(field.get("x", 0)), float(field.get("y", 0))
+    color = field.get("color") or "#111111"
+
+    line_h = metrics["line_h"]
+    total_h = metrics["height"]
+    n = len(lines)
+    line_gap = max(0, (total_h - n * line_h) // (n - 1)) if n > 1 else 0
 
     if valign == "top":
         y0 = y
@@ -251,12 +286,101 @@ def resolve_photo(value, config: dict, excel_dir=None) -> Path | None:
     return None
 
 
+# --------------------------------------------------- photo shaping ----
+
+# background-removal results are cached per file+tolerance so a batch
+# re-uses the same photo across many rows without re-computing.
+_BG_CACHE: dict = {}
+_BG_CACHE_MAX = 48
+_MAX_BG_WORK = 640           # flood-fill at most this many px on the long side
+_TOL_MAX = 140
+
+
+def _remove_background(ph: Image.Image, tol: int, cache_key=None) -> Image.Image:
+    """Make the background of a photo transparent.
+
+    Flood-fills from the border pixels with a tolerance, so only background
+    *connected to the border* is removed — same-coloured parts inside the
+    subject survive. Returns an RGBA image with a soft-edged alpha.
+    """
+    tol = max(2, min(_TOL_MAX, int(tol or 30)))
+    work = ph.convert("RGB")
+    if max(work.size) > _MAX_BG_WORK:
+        scale = _MAX_BG_WORK / max(work.size)
+        work = work.resize(
+            (max(1, round(work.width * scale)), max(1, round(work.height * scale))),
+            Image.Resampling.BILINEAR,
+        )
+
+    mask = None
+    if cache_key is not None:
+        cached = _BG_CACHE.get(cache_key)
+        if cached and cached[0] == tol:
+            mask = cached[1]
+    if mask is None:
+        mask = Image.new("L", work.size, 255)   # 255 = keep, 0 = background
+        mpx = mask.load()
+        wpx = work.load()
+        W, H = work.size
+        seeds = [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1),
+                 (0, H // 2), (W // 2, 0), (W - 1, H // 2), (W // 2, H - 1)]
+        visited = bytearray(W * H)
+        q: deque = deque()
+        for sx, sy in seeds:
+            idx = sy * W + sx
+            if not visited[idx]:
+                visited[idx] = 1
+                q.append((sx, sy, wpx[sx, sy][:3]))
+        t2 = tol * tol * 3
+        while q:
+            px, py, seed = q.popleft()
+            mpx[px, py] = 0
+            for nx, ny in ((px + 1, py), (px - 1, py), (px, py + 1), (px, py - 1)):
+                if 0 <= nx < W and 0 <= ny < H:
+                    idx = ny * W + nx
+                    if not visited[idx]:
+                        nr, ng, nb = wpx[nx, ny][:3]
+                        if ((seed[0] - nr) ** 2 + (seed[1] - ng) ** 2
+                                + (seed[2] - nb) ** 2) <= t2:
+                            visited[idx] = 1
+                            q.append((nx, ny, seed))
+        if cache_key is not None:
+            if len(_BG_CACHE) >= _BG_CACHE_MAX:
+                _BG_CACHE.pop(next(iter(_BG_CACHE)))
+            _BG_CACHE[cache_key] = (tol, mask)
+
+    # upscale the working mask and keep a soft anti-aliased edge
+    alpha = mask.resize(ph.size, Image.Resampling.LANCZOS)
+    alpha = alpha.point(lambda v: 0 if v < 40 else (255 if v > 215 else v))
+    out = ph.convert("RGBA")
+    out.putalpha(alpha)
+    return out
+
+
+def _box_mask(w: int, h: int, shape: str, radius: int) -> Image.Image:
+    """Alpha mask for the photo box: rectangle / rounded / circle."""
+    mask = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(mask)
+    if shape == "circle":
+        d.ellipse([0, 0, w - 1, h - 1], fill=255)
+    elif shape == "round":
+        r = max(0, min(int(radius or 0), min(w, h) // 2))
+        d.rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=255)
+    else:
+        d.rectangle([0, 0, w - 1, h - 1], fill=255)
+    return mask
+
+
 def _draw_photo(base, draw, field: dict, row: dict, config: dict,
                 excel_dir: Path | None, warnings: list | None) -> None:
     x = int(field.get("x", 0))
     y = int(field.get("y", 0))
     w = max(4, int(field.get("width", 300)))
     h = max(4, int(field.get("height", 400)))
+    shape = field.get("shape") or "rect"
+    radius = int(field.get("radius") or 0)
+    bg_remove = bool(field.get("bg_remove"))
+    bg_tol = field.get("bg_tol", 30)
 
     name = _column_name(field.get("column"))
     path = resolve_photo(row.get(name, ""), config, excel_dir)
@@ -274,7 +398,7 @@ def _draw_photo(base, draw, field: dict, row: dict, config: dict,
         return
 
     try:
-        ph = Image.open(path).convert("RGB")
+        ph = Image.open(path)
     except Exception:
         if warnings is not None:
             warnings.append(f"could not open photo: {path.name}")
@@ -282,25 +406,64 @@ def _draw_photo(base, draw, field: dict, row: dict, config: dict,
                        outline=(200, 70, 70), width=3)
         return
 
+    if bg_remove:
+        try:
+            mtime = 0
+            try:
+                mtime = path.stat().st_mtime_ns
+            except OSError:
+                pass
+            ph = _remove_background(ph, bg_tol, cache_key=(str(path), mtime))
+        except Exception:
+            if warnings is not None:
+                warnings.append(f"background removal failed for: {path.name}")
+            ph = ph.convert("RGB")
+    else:
+        ph = ph.convert("RGB")
+
     fit = field.get("fit") or "fill"
     if fit == "fill":
         scale = max(w / ph.width, h / ph.height)
         nw, nh = max(w, round(ph.width * scale)), max(h, round(ph.height * scale))
         ph = ph.resize((nw, nh), Image.Resampling.LANCZOS)
         left, top = (nw - w) // 2, (nh - h) // 2
-        base.paste(ph.crop((left, top, left + w, top + h)), (x, y))
+        ph = ph.crop((left, top, left + w, top + h))
+        px, py = x, y
     else:  # contain
         scale = min(w / ph.width, h / ph.height)
         nw, nh = max(1, round(ph.width * scale)), max(1, round(ph.height * scale))
         ph = ph.resize((nw, nh), Image.Resampling.LANCZOS)
-        base.paste(ph, (x + (w - nw) // 2, y + (h - nh) // 2))
+        px, py = x + (w - nw) // 2, y + (h - nh) // 2
+
+    if shape != "rect" or bg_remove:
+        if shape == "rect":
+            alpha = ph.getchannel("A")
+        elif bg_remove:
+            alpha = ImageChops.darker(_box_mask(ph.width, ph.height, shape, radius),
+                                      ph.getchannel("A"))
+        else:
+            alpha = _box_mask(ph.width, ph.height, shape, radius)
+        base.paste(ph, (px, py), alpha)
+    else:
+        base.paste(ph, (px, py))
 
     bw = int(field.get("border") or 0)
     if bw > 0:
-        draw.rectangle(
-            [x + bw // 2, y + bw // 2, x + w - bw // 2, y + h - bw // 2],
-            outline=field.get("border_color") or "#20306E", width=bw,
-        )
+        color = field.get("border_color") or "#20306E"
+        r = max(0, min(radius, min(w, h) // 2))
+        if shape == "circle":
+            draw.ellipse([x + bw // 2, y + bw // 2, x + w - bw // 2, y + h - bw // 2],
+                         outline=color, width=bw)
+        elif shape == "round" and r > 0:
+            draw.rounded_rectangle(
+                [x + bw // 2, y + bw // 2, x + w - bw // 2, y + h - bw // 2],
+                radius=r, outline=color, width=bw,
+            )
+        else:
+            draw.rectangle(
+                [x + bw // 2, y + bw // 2, x + w - bw // 2, y + h - bw // 2],
+                outline=color, width=bw,
+            )
 
 
 # -------------------------------------------------------------- render -----

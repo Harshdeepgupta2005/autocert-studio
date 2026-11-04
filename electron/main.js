@@ -94,7 +94,10 @@ function createWindow() {
   win.once("ready-to-show", () => win.show());
 
   /* debug hook: AUTOCERT_CAPTURE=/path.png screenshots the app then quits.
-     Combine with AUTOCERT_DEMO=1 to load the built-in demo first. */
+     Combine with AUTOCERT_DEMO=1 to load the built-in demo first,
+     AUTOCERT_SELECT=1 to select a field (shows the property panel),
+     AUTOCERT_PROPS=1 to scroll the property panel into view, and
+     AUTOCERT_ERR=1 to open the generation-warnings dialog. */
   if (process.env.AUTOCERT_CAPTURE) {
     const out = process.env.AUTOCERT_CAPTURE;
     win.webContents.once("did-finish-load", () => {
@@ -104,6 +107,28 @@ function createWindow() {
             await win.webContents.executeJavaScript(
               "document.getElementById('btnWelcomeDemo')?.click(); true");
             await new Promise((r) => setTimeout(r, 3500));
+          } catch (_) { /* best effort */ }
+        }
+        if (process.env.AUTOCERT_SELECT) {
+          try {
+            await win.webContents.executeJavaScript(
+              "(S.config && S.config.fields && typeof select==='function') ? " +
+              "(select(S.config.fields.find(f => f.type === 'text') || S.config.fields[0]), true) : true");
+            await new Promise((r) => setTimeout(r, 1800));
+            if (process.env.AUTOCERT_PROPS) {
+              await win.webContents.executeJavaScript(
+                "document.getElementById('propsCard')?.scrollIntoView({block:'start'}); true");
+              await new Promise((r) => setTimeout(r, 900));
+            }
+          } catch (_) { /* best effort */ }
+        }
+        if (process.env.AUTOCERT_ERR) {
+          try {
+            await win.webContents.executeJavaScript(
+              "(typeof showWarnings === 'function' ? showWarnings([" +
+              "{row: 2, message: 'photo not found in Excel column'}," +
+              "{row: 4, message: 'background removal failed for: photo_03.jpg'}]) : null); true");
+            await new Promise((r) => setTimeout(r, 700));
           } catch (_) { /* best effort */ }
         }
         try {

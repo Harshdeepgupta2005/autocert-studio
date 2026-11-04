@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import renderer
 from app_config import RES_DIR, UPLOADS, PROJECTS, OUTPUT, DATA_DIR, FONTS_DIR
@@ -57,7 +57,7 @@ def health():
 
 @app.get("/api/fonts")
 def fonts():
-    return {"fonts": renderer.font_labels()}
+    return {"fonts": renderer.font_labels(), "dir": str(FONTS_DIR)}
 
 
 # --------------------------------------------------------------- uploads ---
@@ -136,19 +136,7 @@ def preview():
     except ValueError:
         pass
 
-    excel = cfg.get("excel") or {}
-    rows, excel_dir = [], None
-    if excel.get("path") and Path(excel["path"]).is_file():
-        try:
-            _columns, rows = read_table(excel["path"])
-            excel_dir = Path(excel["path"]).parent
-        except Exception:
-            rows = []
-    if rows:
-        row = max(0, min(row, len(rows) - 1))
-        data = rows[row]
-    else:
-        data = {}
+    data, excel_dir = _excel_row(cfg, row)
 
     warnings: list[str] = []
     try:
@@ -167,6 +155,106 @@ def preview():
     if warnings:
         resp.headers["X-Generation-Warnings"] = " | ".join(warnings)
     return resp
+
+
+def _excel_row(cfg: dict, row_index: int):
+    """Return (row_data, excel_dir) for preview/metrics."""
+    excel = cfg.get("excel") or {}
+    if excel.get("path") and Path(excel["path"]).is_file():
+        try:
+            _columns, rows = read_table(excel["path"])
+            excel_dir = Path(excel["path"]).parent
+            if rows:
+                row_index = max(0, min(row_index, len(rows) - 1))
+                return rows[row_index], excel_dir
+            return {}, excel_dir
+        except Exception:
+            pass
+    return {}, None
+
+
+# ------------------------------------------------------------ text metrics---
+
+@app.post("/api/text-metrics")
+def text_metrics():
+    """Exact rendered size of one text field (for on-canvas bounding boxes).
+
+    Body: the project config (same shape /api/preview takes).
+    Query: ?row=N to pick which Excel row provides the sample value.
+    """
+    cfg = request.get_json(force=True, silent=True)
+    field = (cfg or {}).get("field") or {}
+    row = 0
+    try:
+        row = int(request.args.get("row", 0))
+    except ValueError:
+        pass
+    data, _excel_dir = _excel_row(cfg or {}, row)
+    txt = renderer.compose_text(field, data)
+    if not txt:
+        return {"width": 0, "height": 0, "text": ""}
+    m = renderer.layout_text(txt, field)
+    return {"width": m["width"], "height": m["height"], "text": txt}
+
+
+# ----------------------------------------------------------------- fonts ---
+
+@app.get("/api/font-preview")
+def font_preview():
+    """Render 'Abc 123' in the requested font as a small PNG strip."""
+    label = request.args.get("label", "")
+    text = (request.args.get("text") or "Abc 123")[:28]
+    path = renderer.font_path(label)
+    if not path:
+        return jsonify(error="unknown font"), 404
+    try:
+        font = renderer.get_font(label, 24)
+        tmp = Image.new("RGB", (4, 4))
+        d = ImageDraw.Draw(tmp)
+        w = max(2, int(d.textlength(text, font=font)) + 8)
+        ascent, descent = font.getmetrics()
+        h = ascent + descent + 6
+        img = Image.new("RGB", (w, h), (255, 255, 255))
+        ImageDraw.Draw(img).text((4, 2), text, font=font, fill=(20, 24, 44))
+    except Exception:
+        return jsonify(error="font could not be rendered"), 500
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    resp = Response(buf.getvalue(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "max-age=86400"
+    return resp
+
+
+@app.post("/api/import-fonts")
+def import_fonts():
+    """Save uploaded .ttf/.otf/.ttc files into the user fonts folder."""
+    files = request.files.getlist("file")
+    if not files:
+        return jsonify(error="No font files received"), 400
+    added: list[str] = []
+    for f in files:
+        if not f or not f.filename:
+            continue
+        name = Path(f.filename).name
+        if Path(name).suffix.lower() not in renderer.FONT_EXTS:
+            continue
+        dest = FONTS_DIR / name
+        try:
+            f.save(dest)
+            added.append(dest.stem.replace("_", " ").strip())
+        except OSError:
+            continue
+    if not added:
+        return jsonify(error="No .ttf, .otf or .ttc files in the upload"), 400
+    renderer.refresh_fonts()
+    return {"added": added, "fonts": renderer.font_labels()}
+
+
+@app.post("/api/fonts/refresh")
+def fonts_refresh():
+    """Re-scan font folders (also after removing files manually)."""
+    renderer.refresh_fonts()
+    return {"fonts": renderer.font_labels()}
 
 
 # -------------------------------------------------------------- generate ---
@@ -261,6 +349,10 @@ def generate():
     cfg = request.get_json(force=True, silent=True)
     if not cfg or "template" not in cfg or "excel" not in cfg:
         return jsonify(error="Upload a design and an Excel file first."), 400
+    # keep the jobs table bounded (browser sessions accumulate old jobs)
+    with JOBS_LOCK:
+        while len(JOBS) >= 50:
+            JOBS.pop(next(iter(JOBS)))
     job_id = uuid.uuid4().hex[:12]
     with JOBS_LOCK:
         JOBS[job_id] = {"id": job_id, "status": "running", "total": 0, "done": 0,
@@ -402,8 +494,18 @@ def _watch_stdin() -> None:
     """Sidecar mode: exit as soon as the parent (Electron) closes our stdin.
 
     Guarantees the engine never outlives the app window, even if Electron
-    crashes or is force-killed.
+    crashes or is force-killed. Only breaks the process when stdin is a
+    pipe / file (a parent that can actually be "closed"): when stdin is a
+    terminal or /dev/null there is no watchable parent — keep serving.
     """
+    import stat
+    try:
+        md = os.fstat(0).st_mode
+        watchable = stat.S_ISFIFO(md) or stat.S_ISREG(md)
+    except OSError:
+        watchable = False
+    if not watchable:
+        return
     try:
         while sys.stdin.buffer.read(64 * 1024):
             pass

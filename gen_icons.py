@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+import sys
+
 import renderer
 
 OUT = Path(__file__).resolve().parent / "electron" / "build"
@@ -115,6 +117,22 @@ def main():
     icon.resize((256, 256), Image.Resampling.LANCZOS).save(
         OUT / "icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48),
                                  (64, 64), (128, 128), (256, 256)])
+
+    # macOS .icns (iconutil ships with every Mac)
+    icns = OUT / "icon.icns"
+    if sys.platform == "darwin":
+        import subprocess
+        try:
+            subprocess.run(
+                ["iconutil", "-c", "icns", str(iconset), "-o", str(icns)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            print(png, "→", icns)
+        except Exception as e:
+            print(f"iconutil failed ({e}); electron-builder can use icon.png instead")
+    else:
+        print("build/icon.iconset ready — run: iconutil -c icns "
+              "build/icon.iconset -o build/icon.icns")
     print("icons written to", OUT)
     print(png)
 

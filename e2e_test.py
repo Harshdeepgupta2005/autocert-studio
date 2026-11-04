@@ -1,6 +1,7 @@
 """End-to-end HTTP test against a running AutoCert Studio server (stdlib only)."""
 import http.client
 import json
+import shutil
 import sys
 import time
 import urllib.request
@@ -83,6 +84,47 @@ def main() -> int:
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 30000
     print(f"/api/preview → {len(png)//1024} KB PNG ok")
 
+    # font preview + text metrics
+    with urllib.request.urlopen(ROOT + "/api/font-preview?label=Arial+Bold", timeout=30) as r:
+        fpng = r.read()
+    assert fpng[:8] == b"\x89PNG\r\n\x1a\n" and len(fpng) > 500, len(fpng)
+    print(f"/api/font-preview → {len(fpng)//1024} KB png ok")
+
+    # font import: copy a system font under a test name and install it
+    sys_font = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
+    if sys_font.is_file():
+        tmpf = BASE / "fonts" / "ImportTestFont.ttf"
+        tmpf.parent.mkdir(exist_ok=True)
+        shutil.copy(sys_font, tmpf)
+        st, res = multipart("/api/import-fonts", tmpf, field="file")
+        assert st == 200 and "ImportTestFont" in res["added"], res
+        installed = get_json("/api/fonts")          # -> {fonts, dir} (import copies live in dir)
+        assert "ImportTestFont" in installed["fonts"], installed["fonts"][:8]
+        with urllib.request.urlopen(ROOT + "/api/font-preview?label=ImportTestFont", timeout=30) as r:
+            assert r.read()[:4] == b"\x89PNG"
+        Path(installed["dir"], "ImportTestFont.ttf").unlink()   # uninstall
+        post_json("/api/fonts/refresh", {})
+        installed = get_json("/api/fonts")
+        assert installed["dir"] and "ImportTestFont" not in installed["fonts"]
+        tmpf.unlink(missing_ok=True)
+        print("/api/import-fonts → install / list / preview / uninstall / refresh ok")
+
+    m = post_json("/api/text-metrics?row=0", cfg | {"field": cfg["fields"][0]})
+    assert m["width"] > 50 and m["height"] > 20, m
+    print(f"/api/text-metrics → {m['width']}×{m['height']} for {m['text']!r}")
+
+    # fancy photo: circle shape + background removal
+    fancy = json.loads(json.dumps(cfg))
+    fancy["fields"][1] = dict(fancy["fields"][1],
+                              shape="circle", bg_remove=True, bg_tol=60)
+    req = urllib.request.Request(ROOT + "/api/preview?row=0", method="POST",
+                                 data=json.dumps(fancy).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        fpng = r.read()
+    assert fpng[:8] == b"\x89PNG\r\n\x1a\n"
+    print(f"/api/preview (circle + bg-remove) → {len(fpng)//1024} KB PNG ok")
+
     # missing-photo warning path: column named wrongly
     bad = json.loads(json.dumps(cfg))
     bad["fields"][1] = dict(bad["fields"][1], column="Photo")
@@ -95,8 +137,8 @@ def main() -> int:
         assert r.headers.get("x-generation-warnings")
     print("/api/preview (missing photo) → warning header present")
 
-    # generate + poll
-    job = post_json("/api/generate", cfg)["job"]
+    # generate + poll (with the fancy photo field so the worker path is hit too)
+    job = post_json("/api/generate", fancy)["job"]
     while True:
         stt = get_json("/api/status/" + job)
         if stt.get("status") != "running":

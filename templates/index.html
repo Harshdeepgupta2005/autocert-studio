@@ -82,7 +82,7 @@
         <input type="text" id="photosFolder" placeholder="e.g. /Users/you/Desktop/photos" spellcheck="false">
         <button class="btn mini" id="btnBrowsePhotos" title="Choose the folder (in desktop app)">📁 Browse</button>
       </div>
-      <div class="hint">Needed <b>only if</b> you added photo boxes. In the desktop app use “📁 Browse”. In browser mode: right-click your folder in Finder, hold <b>⌥ Option</b>, choose “Copy as Pathname”, paste here. Full file paths inside the Excel “Photo” column also work.</div>
+      <div class="hint">Needed <b>only if</b> you added photo boxes. In the desktop app use “📁 Browse”. In browser mode: right-click your folder in Finder, hold <b>⌥ Option</b>, choose “Copy as Pathname”, paste here. Full file paths inside the Excel “Photo” column also work. Want circular pictures or a cut-out look? Tick <b>Remove photo background</b> in the photo box settings.</div>
     </section>
 
     <section class="card" id="cardExport">
@@ -191,6 +191,15 @@
   <div class="sheet" role="dialog" aria-modal="true" aria-label="Saved projects">
     <div class="sheetHead"><b>📂 Saved projects</b><button class="btn mini" id="btnCloseModal" title="Close" aria-label="Close">✕</button></div>
     <div id="projectList"></div>
+  </div>
+</div>
+
+<div id="errModal" class="hidden">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Generation warnings">
+    <div class="sheetHead"><b>⚠️ Generation warnings</b><button class="btn mini" id="btnCloseErr" title="Close" aria-label="Close">✕</button></div>
+    <p style="color:var(--muted);font-size:12.5px;margin:0 0 10px">
+      Every card was still generated. These rows just had issues:</p>
+    <div class="errList" id="errListBody"></div>
   </div>
 </div>
 

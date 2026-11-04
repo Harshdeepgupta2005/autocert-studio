@@ -14,6 +14,8 @@ const S = {
   fonts: [],
   counter: 0,
   drag: null,
+  metrics: {},      // field.id -> {w, h, sig} rendered text-block size
+  fontFilter: "",
 };
 
 let prevURL = null;
@@ -69,20 +71,7 @@ function tpl() { return S.config && S.config.template; }
 function xcl() { return S.config && S.config.excel; }
 function columns() { return (xcl() && xcl().columns) || []; }
 
-/* ------------------------------------------------------------------ fonts */
-
-function fontOptionsHTML(cur) {
-  const list = S.fonts.map((f) =>
-    `<option value="${esc(f)}"${f === cur ? " selected" : ""}>${esc(f)}</option>`).join("");
-  if (cur && !S.fonts.includes(cur)) {
-    const first = `<option value="${esc(cur)}" selected>${esc(cur)}</option>`;
-    return first + list;
-  }
-  const blank = `<option value=""${!cur ? " selected" : ""}>— system default —</option>`;
-  return blank + list;
-}
-
-/* ------------------------------------------------------------ field model */
+/* -------------------------------------------------------- field model ---- */
 
 function defaultField(type, x, y) {
   const st = tpl();
@@ -90,7 +79,9 @@ function defaultField(type, x, y) {
   const base = { id: newId(), column: "", x, y };
   if (type === "photo") {
     const bw = Math.max(80, Math.min(600, Math.round(w * 0.2)));
-    return { ...base, type: "photo", fit: "fill", width: bw, height: Math.round(bw * 1.33), border: 0, border_color: "#20306E" };
+    return { ...base, type: "photo", fit: "fill",
+             shape: "rect", radius: 0, bg_remove: false, bg_tol: 30,
+             width: bw, height: Math.round(bw * 1.33), border: 0, border_color: "#20306E" };
   }
   return {
     ...base, type: "text",
@@ -179,6 +170,81 @@ function updateDashboard() {
   $("#btnGenerate").textContent = genLbl;
 }
 
+/* ------------------------------------------------------------ location ---
+   Every field has a visual bounding box. Photos use x/y/w/h directly;
+   text fields use the exact rendered size fetched from /api/text-metrics,
+   so on-canvas boxes and alignment targets match the printed output. */
+
+function metricsSignature(f, row) {
+  return JSON.stringify([f.column, f.font, f.size, f.wrap_width, f.datefmt,
+                         f.prefix, f.suffix, f.uppercase, row]);
+}
+
+async function fetchMetrics(f, row) {
+  const sig = metricsSignature(f, row);
+  const cached = S.metrics[f.id];
+  if (cached && cached.sig === sig) return cached;
+  const token = sig;
+  try {
+    const res = await fetch("/api/text-metrics?row=" + row, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...S.config, field: f }),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    // only apply if the field still asks for these metrics
+    if (metricsSignature(f, row) !== token) return null;
+    S.metrics[f.id] = { w: Math.round(j.width || 0), h: Math.round(j.height || 0), sig };
+    syncOverlays();
+    return S.metrics[f.id];
+  } catch (_) {
+    return null;
+  }
+}
+
+function queueMetrics(f) {
+  if (!f || f.type !== "text") return;
+  clearTimeout(f.__mTimer);
+  f.__mTimer = setTimeout(() => fetchMetrics(f, currentRow() - 1), 250);
+}
+
+function fieldBox(f) {
+  if (f.type === "photo") {
+    return { left: f.x, top: f.y, right: f.x + f.width, bottom: f.y + f.height };
+  }
+  const m = S.metrics[f.id] || { w: 0, h: 0 };
+  const align = f.align || "left", valign = f.valign || "top";
+  const left = align === "left" ? f.x : align === "right" ? f.x - m.w : f.x - m.w / 2;
+  const top = valign === "top" ? f.y : valign === "bottom" ? f.y - m.h : f.y - m.h / 2;
+  return { left, top, right: left + m.w, bottom: top + m.h };
+}
+
+function canvasExtent() {
+  const st = tpl();
+  return { W: st ? st.width : 1200, H: st ? st.height : 750 };
+}
+
+function alignField(f, which) {
+  const { W, H } = canvasExtent();
+  if (f.type !== "photo") queueMetrics(f);       // make sure we have a box
+  const b = fieldBox(f);
+  let dx = 0, dy = 0;
+  if (which === "left") dx = 0 - b.left;
+  else if (which === "hcenter") dx = W / 2 - (b.left + b.right) / 2;
+  else if (which === "right") dx = W - b.right;
+  else if (which === "top") dy = 0 - b.top;
+  else if (which === "vcenter") dy = H / 2 - (b.top + b.bottom) / 2;
+  else if (which === "bottom") dy = H - b.bottom;
+  if (!dx && !dy) return;
+  f.x += Math.round(dx);
+  f.y += Math.round(dy);
+  fillPropsXY(f);
+  syncOverlays();
+  saveLocal();
+  schedulePreview(300);
+}
+
 /* --------------------------------------------------------------- add-mode */
 
 function setMode(m) {
@@ -215,6 +281,7 @@ function addField(type, x, y) {
 
 function select(f) {
   S.selected = f;
+  if (f && f.type === "text") queueMetrics(f);
   syncOverlays();
   renderFieldList();
   buildProps();
@@ -288,6 +355,23 @@ function syncOverlays() {
   const st = tpl();
   if (!st) return;
   const scale = canvasScale();
+
+  /* true bounding box behind the selected text field */
+  const f = S.selected;
+  if (f && f.type === "text") {
+    const m = S.metrics[f.id];
+    if (m && (m.w > 0 || m.h > 0)) {
+      const b = fieldBox(f);
+      const el = document.createElement("div");
+      el.className = "vText sel";
+      el.style.left = (b.left * scale) + "px";
+      el.style.top = (b.top * scale) + "px";
+      el.style.width = (m.w * scale) + "px";
+      el.style.height = (m.h * scale) + "px";
+      wrap.appendChild(el);
+    }
+  }
+
   for (const f of S.config.fields) {
     let el;
     const sel = S.selected === f ? " sel" : "";
@@ -299,6 +383,8 @@ function syncOverlays() {
       el.style.width = (f.width * scale) + "px";
       el.style.height = (f.height * scale) + "px";
       el.innerHTML = `<span class="pip">📷 ${esc(fieldLabel(f))}</span>`;
+      if (f.shape === "circle") el.style.borderRadius = "50%";
+      else if (f.shape === "round") el.style.borderRadius = Math.min(f.radius, Math.min(f.width, f.height) / 2) * scale + "px";
     } else {
       el = document.createElement("div");
       el.className = "mark" + sel;
@@ -310,6 +396,10 @@ function syncOverlays() {
     el.addEventListener("pointerdown", (e) => beginDrag(f, e));
     wrap.appendChild(el);
   }
+}
+
+function clearGuides() {
+  $$("#overlays .snapGuide").forEach((g) => g.remove());
 }
 
 function updateOverlayEl(f) {
@@ -339,6 +429,59 @@ function beginDrag(f, e) {
   document.body.classList.add("grabbing");
 }
 
+const SNAP_PX = 6;
+
+function computeSnap(f) {
+  /* Snap the field's box against the canvas edges/centre and against every
+     other field. Returns {dx, dy, guides} or null. */
+  const { W, H } = canvasExtent();
+  const b = fieldBox(f);
+  const candsX = [[b.left, "left"], [(b.left + b.right) / 2, "cx"], [b.right, "right"]];
+  const candsY = [[b.top, "top"], [(b.top + b.bottom) / 2, "cy"], [b.bottom, "bottom"]];
+  const targetsX = [0, W / 2, W];
+  const targetsY = [0, H / 2, H];
+  for (const o of S.config.fields) {
+    if (o === f) continue;
+    const ob = fieldBox(o);
+    targetsX.push(ob.left, (ob.left + ob.right) / 2, ob.right);
+    targetsY.push(ob.top, (ob.top + ob.bottom) / 2, ob.bottom);
+  }
+  let bestX = null, bestY = null;
+  for (const [pos, kind] of candsX) {
+    for (const t of targetsX) {
+      const d = t - pos;
+      if (Math.abs(d) <= SNAP_PX && (!bestX || Math.abs(d) < Math.abs(bestX.d)))
+        bestX = { d, t, kind };
+    }
+  }
+  for (const [pos, kind] of candsY) {
+    for (const t of targetsY) {
+      const d = t - pos;
+      if (Math.abs(d) <= SNAP_PX && (!bestY || Math.abs(d) < Math.abs(bestY.d)))
+        bestY = { d, t, kind };
+    }
+  }
+  if (!bestX && !bestY) return null;
+  const guides = [];
+  if (bestX) guides.push({ dir: "v", pos: bestX.t });
+  if (bestY) guides.push({ dir: "h", pos: bestY.t });
+  return { dx: bestX ? Math.round(bestX.d) : 0, dy: bestY ? Math.round(bestY.d) : 0, guides };
+}
+
+function drawGuides(guides) {
+  clearGuides();
+  if (!guides) return;
+  const wrap = $("#overlays");
+  const scale = canvasScale();
+  for (const g of guides) {
+    const el = document.createElement("div");
+    el.className = "snapGuide " + g.dir;
+    if (g.dir === "v") el.style.left = (g.pos * scale) + "px";
+    else el.style.top = (g.pos * scale) + "px";
+    wrap.appendChild(el);
+  }
+}
+
 function dragMove(e) {
   if (!S.drag) return;
   const st = tpl(); if (!st) return;
@@ -348,6 +491,12 @@ function dragMove(e) {
   const ny = Math.round(Math.max(0, Math.min(st.height, (e.clientY - S.drag.dy) / scale)));
   if (nx !== f.x || ny !== f.y) { S.drag.moved = true; }
   f.x = nx; f.y = ny;
+  const snap = computeSnap(f);
+  if (snap && (snap.dx || snap.dy)) {
+    f.x = Math.max(0, Math.min(st.width, f.x + snap.dx));
+    f.y = Math.max(0, Math.min(st.height, f.y + snap.dy));
+  }
+  drawGuides(snap && (snap.dx || snap.dy) ? snap.guides : null);
   updateOverlayEl(f);
   if (S.selected === f) fillPropsXY(f);
 }
@@ -355,6 +504,7 @@ function dragMove(e) {
 function dragEnd() {
   window.removeEventListener("pointermove", dragMove);
   document.body.classList.remove("grabbing");
+  clearGuides();
   const d = S.drag; S.drag = null;
   if (d && d.moved) { saveLocal(); schedulePreview(400); }
 }
@@ -417,10 +567,72 @@ function seg(pairs, cur) {
     `<button type="button" data-v="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("");
 }
 
+/* ── font picker: searchable list with a live preview strip per font ── */
+
+function fontPreviewURL(label) {
+  return `/api/font-preview?text=${encodeURIComponent("Abc 123 · Aarav @2026")}` +
+         `&label=${encodeURIComponent(label)}`;
+}
+
+function fontItemsHTML(cur) {
+  const def = `
+    <div class="fItem${!cur ? " sel" : ""}" data-label="">
+      <div class="fDefault">— system default —</div><span class="fName">&nbsp;</span>
+    </div>`;
+  const items = S.fonts
+    .filter((f) => !S.fontFilter ||
+      f.toLowerCase().includes(S.fontFilter.toLowerCase()))
+    .map((f) => `
+      <div class="fItem${f === cur ? " sel" : ""}" data-label="${esc(f)}">
+        <img loading="lazy" src="${fontPreviewURL(f)}" alt="">
+        <span class="fName">${esc(f)}</span>
+      </div>`)
+    .join("");
+  return cur ? items + def : def + items;
+}
+
+function fontPickerHTML(cur) {
+  return `
+    <div class="fontPick">
+      <div class="fpTop">
+        <input type="text" id="pFontSearch" placeholder="Search ${S.fonts.length} fonts…" value="${esc(S.fontFilter)}" spellcheck="false">
+        <button class="btn mini primary fpImport" id="pFontImport" title="Install .ttf / .otf files into your fonts folder">⤓ Import</button>
+      </div>
+      <div class="fontList" id="pFontList">${fontItemsHTML(cur)}</div>
+    </div>`;
+}
+
+/* ── shared props scaffolding ── */
+
+const ALIGN_BUTTONS = [
+  ["left", "⇤"], ["hcenter", "⇔"], ["right", "⇥"],
+  ["top", "⤒"], ["vcenter", "⥮"], ["bottom", "⤓"],
+];
+
+function alignRowHTML() {
+  return `
+    <div class="secLabel">Position &amp; align</div>
+    <div class="row2">
+      <label>X (px)<input type="number" id="pX" value="${S.selected.x}"></label>
+      <label>Y (px)<input type="number" id="pY" value="${S.selected.y}"></label>
+    </div>
+    <label>Align on the design
+      <div class="alignGrid" id="pAlignGrid">
+        ${ALIGN_BUTTONS.map(([v, ic]) =>
+          `<button type="button" data-v="${v}" title="${{
+             left:"Left edge", hcenter:"Horizontal centre", right:"Right edge",
+             top:"Top edge", vcenter:"Vertical centre", bottom:"Bottom edge"
+           }[v]}">${ic}</button>`).join("")}
+      </div>
+    </label>
+    <div class="alignHint">Drag near centres to snap · arrows nudge (Shift = 10 px)</div>`;
+}
+
 function buildProps() {
   const box = $("#props");
   const f = S.selected;
   if (!f) { box.innerHTML = `<p class="none">Select a field on the design (or in the list above) to edit it here.</p>`; return; }
+
   if (f.type === "photo") {
     box.innerHTML = `
       <div class="secLabel">Data</div>
@@ -438,16 +650,26 @@ function buildProps() {
           <option value="contain"${f.fit === "contain" ? " selected" : ""}>Fit — show whole photo</option>
         </select>
       </label>
+      <div class="secLabel">Shape &amp; background</div>
+      <div class="shapeRow" id="pShape">
+        ${seg([["rect", "▭ Rect"], ["round", "▢ Rounded"], ["circle", "◯ Circle"]], f.shape || "rect")}
+      </div>
+      <div class="row2" id="pRadiusRow" ${f.shape === "round" ? "" : "hidden"}>
+        <label>Radius (px)<input type="number" id="pRadius" min="0" max="${Math.floor(Math.min(f.width, f.height) / 2)}" value="${f.radius || 0}"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="pBgRemove" ${f.bg_remove ? "checked" : ""}> ✂ Remove photo background (makes white/solid backdrops transparent)</label>
+      <div id="pTolRow" ${f.bg_remove ? "" : "hidden"}>
+        <label>Removal strength: <b id="pTolVal">${f.bg_tol != null ? f.bg_tol : 30}</b>
+          <input type="range" id="pTol" min="5" max="110" value="${f.bg_tol != null ? f.bg_tol : 30}">
+        </label>
+        <div class="alignHint">Low = strict, keeps even faint colours. High = aggressive, may eat similar subject colours.</div>
+      </div>
       <div class="secLabel">Frame</div>
       <div class="row2">
         <label>Border (px)<input type="number" id="pBorder" min="0" value="${f.border}"></label>
         <label>Border colour<input type="color" id="pBColor" value="${esc(f.border_color)}"></label>
       </div>
-      <div class="secLabel">Position (px on design)</div>
-      <div class="row2">
-        <label>X (px)<input type="number" id="pX" value="${f.x}"></label>
-        <label>Y (px)<input type="number" id="pY" value="${f.y}"></label>
-      </div>
+      ${alignRowHTML()}
       <div class="delRow"><button class="btn danger" id="pDelete">🗑 Delete photo box</button></div>`;
   } else {
     box.innerHTML = `
@@ -455,25 +677,34 @@ function buildProps() {
       <label>Excel column (or “custom text”)
         <select id="pColumn">${colOptionsHTML("text", f.column)}</select>
       </label>
-      <div class="secLabel">Look</div>
-      <label>Font
-        <select id="pFont">${fontOptionsHTML(f.font)}</select>
-      </label>
-      <div class="row2">
+      <div class="secLabel">Font</div>
+      ${fontPickerHTML(f.font || "")}
+      <div class="row2" style="margin-top:9px">
         <label>Size (px)<input type="number" id="pSize" min="6" value="${f.size}"></label>
         <label>Colour<input type="color" id="pColor" value="${esc(f.color)}"></label>
       </div>
-      <div class="secLabel">Position</div>
+      <div class="secLabel">Text</div>
       <label>How the text sits on its X point
         <div class="segRow" id="pAlign">${seg([["left", "◀ grows right"], ["center", "◀— centered"], ["right", "grows left ▶"]], f.align)}</div>
       </label>
       <label>How the text sits on its Y point
         <div class="segRow" id="pVAlign">${seg([["top", "▲ above"], ["center", "centered"], ["bottom", "▼ below"]], f.valign)}</div>
       </label>
+      <div class="secLabel">Position &amp; align</div>
       <div class="row2">
         <label>X (px)<input type="number" id="pX" value="${f.x}"></label>
         <label>Y (px)<input type="number" id="pY" value="${f.y}"></label>
       </div>
+      <label>Align on the design
+        <div class="alignGrid" id="pAlignGrid">
+          ${ALIGN_BUTTONS.map(([v, ic]) =>
+            `<button type="button" data-v="${v}" title="${{
+               left:"Left edge", hcenter:"Horizontal centre", right:"Right edge",
+               top:"Top edge", vcenter:"Vertical centre", bottom:"Bottom edge"
+             }[v]}">${ic}</button>`).join("")}
+        </div>
+      </label>
+      <div class="alignHint">Boxes in dashed outline = exactly where text will print · snap while dragging</div>
       <div class="secLabel">Text options</div>
       <label>Wrap width (px · 0 = single line)<input type="number" id="pWrap" min="0" value="${f.wrap_width}"></label>
       <label>If the column is a date, show it as
@@ -489,25 +720,61 @@ function buildProps() {
     const el = box.querySelector(id);
     if (el) el.addEventListener(ev, fn);
   };
-  const touch = (after) => {
+  const touch = (after, opts = {}) => {
     if (after) after();
     syncOverlays();
     renderFieldList();
     updateDashboard();
     saveLocal();
     schedulePreview(300);
+    if (f.type === "text" && !opts.noMetrics) queueMetrics(f);
   };
 
   bind("#pColumn", "change", (e) => { f.column = e.target.value; touch(); });
   bind("#pDelete", "click", () => deleteField(f));
+
+  /* alignment buttons (both field types) */
+  const grid = box.querySelector("#pAlignGrid");
+  if (grid) grid.addEventListener("click", (e) => {
+    const v = e.target.dataset && e.target.dataset.v;
+    if (!v) return;
+    alignField(f, v);
+  });
+
   if (f.type === "photo") {
-    bind("#pW", "input", (e) => touch(() => { f.width = Math.max(4, +e.target.value || 4); }));
-    bind("#pH", "input", (e) => touch(() => { f.height = Math.max(4, +e.target.value || 4); }));
+    bind("#pW", "input", (e) => touch(() => { f.width = Math.max(4, +e.target.value || 4); sanitizeRadiusUI(f); }));
+    bind("#pH", "input", (e) => touch(() => { f.height = Math.max(4, +e.target.value || 4); sanitizeRadiusUI(f); }));
     bind("#pFit", "change", (e) => touch(() => { f.fit = e.target.value; }));
     bind("#pBorder", "input", (e) => touch(() => { f.border = Math.max(0, +e.target.value || 0); }));
     bind("#pBColor", "input", (e) => touch(() => { f.border_color = e.target.value; }));
+
+    const shapeRow = box.querySelector("#pShape");
+    shapeRow.addEventListener("click", (e) => {
+      const v = e.target.dataset && e.target.dataset.v; if (!v) return;
+      f.shape = v;
+      box.querySelectorAll("#pShape button").forEach((b) =>
+        b.classList.toggle("on", b.dataset.v === v));
+      const rr = box.querySelector("#pRadiusRow");
+      if (rr) rr.hidden = v !== "round";
+      shapeRow.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+      touch();
+    });
+    const radiusRow = box.querySelector("#pRadiusRow");
+    if (radiusRow) radiusRow.hidden = f.shape !== "round";
+    bind("#pRadius", "input", (e) => touch(() => { f.radius = Math.max(0, +e.target.value || 0); }));
+    bind("#pBgRemove", "change", (e) => {
+      f.bg_remove = e.target.checked;
+      const tr = box.querySelector("#pTolRow");
+      if (tr) tr.hidden = !f.bg_remove;
+      touch();
+    });
+    bind("#pTol", "input", (e) => {
+      f.bg_tol = +e.target.value;
+      const lbl = box.querySelector("#pTolVal");
+      if (lbl) lbl.textContent = f.bg_tol;
+      touch();
+    });
   } else {
-    bind("#pFont", "change", (e) => touch(() => { f.font = e.target.value; }));
     bind("#pSize", "input", (e) => touch(() => { f.size = Math.max(6, +e.target.value || 6); }));
     bind("#pColor", "input", (e) => touch(() => { f.color = e.target.value; }));
     box.querySelector("#pAlign").addEventListener("click", (e) => {
@@ -523,9 +790,69 @@ function buildProps() {
     bind("#pPrefix", "input", (e) => touch(() => { f.prefix = e.target.value; }));
     bind("#pSuffix", "input", (e) => touch(() => { f.suffix = e.target.value; }));
     bind("#pUpper", "change", (e) => touch(() => { f.uppercase = e.target.checked; }));
+
+    /* font picker wiring */
+    const search = box.querySelector("#pFontSearch");
+    if (search) {
+      search.addEventListener("input", (e) => {
+        S.fontFilter = e.target.value;
+        const holder = box.querySelector("#pFontList");
+        if (holder) refreshFontList(holder, f.font || "");
+        // keep focus in the search box after re-render
+        const s2 = box.querySelector("#pFontSearch");
+        if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); }
+      });
+    }
+    const list = box.querySelector("#pFontList");
+    if (list) list.addEventListener("click", (e) => {
+      const item = e.target.closest(".fItem");
+      if (!item) return;
+      f.font = item.dataset.label || "";
+      touch();
+      // re-mark selection without rebuilding (keeps scroll position)
+      list.querySelectorAll(".fItem").forEach((i2) =>
+        i2.classList.toggle("sel", i2.dataset.label === f.font));
+    });
+    const imp = box.querySelector("#pFontImport");
+    if (imp) imp.addEventListener("click", () => pickFontFiles());
   }
   bind("#pX", "change", (e) => touch(() => { f.x = Math.round(+e.target.value || 0); }));
   bind("#pY", "change", (e) => touch(() => { f.y = Math.round(+e.target.value || 0); }));
+
+  if (f.type === "text") queueMetrics(f);
+}
+
+function sanitizeRadiusUI(f) {
+  const inp = $("#pRadius");
+  if (inp) inp.max = Math.floor(Math.min(f.width, f.height) / 2);
+}
+
+let fontImportInput = null;
+
+async function pickFontFiles() {
+  if (!fontImportInput) {
+    fontImportInput = document.createElement("input");
+    fontImportInput.type = "file";
+    fontImportInput.accept = ".ttf,.otf,.ttc";
+    fontImportInput.multiple = true;
+    fontImportInput.hidden = true;
+    document.body.appendChild(fontImportInput);
+    fontImportInput.addEventListener("change", () => uploadFonts(fontImportInput.files));
+  }
+  fontImportInput.click();
+}
+
+async function uploadFonts(fileList) {
+  const files = [...fileList].filter((x) => /\.(ttf|otf|ttc)$/i.test(x.name));
+  if (!files.length) { toast("Choose .ttf, .otf or .ttc files.", "warn"); return; }
+  const fd = new FormData();
+  for (const file of files) fd.append("file", file);
+  const res = await fetch("/api/import-fonts", { method: "POST", body: fd });
+  const j = await res.json().catch(() => ({ error: "Import failed" }));
+  if (j.error) { toast(j.error, "error", 6000); return; }
+  S.fonts = j.fonts || S.fonts;
+  toast(`Installed ${j.added.length} font${j.added.length === 1 ? "" : "s"}: ${j.added.join(", ")}`, "ok", 6000);
+  if (S.selected && S.selected.type === "text") buildProps();   // refresh previews
 }
 
 function fillPropsXY(f) {
@@ -565,6 +892,7 @@ async function onTemplate(file) {
   S.config.template = res;
   S.config.fields = [];        // new design → old positions make no sense
   S.selected = null;
+  S.metrics = {};
   toast("Design loaded — now add fields for the changing data (step 3).", "ok");
   await afterConfigChange();
 }
@@ -573,6 +901,7 @@ async function onExcel(file) {
   const res = await uploadFile("/api/upload-excel", file);
   if (!res) return;
   S.config.excel = res;
+  S.metrics = {};              // sample values change → re-measure
   autoPickFilenameColumn();
   toast(`${res.row_count} rows loaded · columns: ${res.columns.slice(0, 4).join(", ")}${res.columns.length > 4 ? " …" : ""}`, "ok");
   await afterConfigChange();
@@ -672,6 +1001,7 @@ function rowShift(delta) {
     (xcl() && xcl().row_count) || 1,
   );
   $("#previewRow").value = v;
+  if (S.selected && S.selected.type === "text") queueMetrics(S.selected);
   refreshPreview();
 }
 
@@ -733,12 +1063,27 @@ function finishPoll(st, id, label, text) {
       ? `<button class="btn mini" id="btnErrList">see warnings</button>` : "";
     res.innerHTML = `folder: <b>${esc(owner)}</b> ${zipBtn} ${errBtn}`;
     const eb = $("#btnErrList");
-    if (eb) eb.onclick = () => alert(st.errors.map((e) => `Row ${e.row}: ${e.message}`).join("\n"));
+    if (eb) {
+      eb.onclick = () => showWarnings(st.errors);
+      if (st.errors.length) showWarnings(st.errors);
+    }
   } else {
     label.textContent = "❌ Generation failed";
     text.className = "err";
     text.textContent = st.error || "unknown error";
   }
+}
+
+/* ------------------------------------------------------------ warnings UI */
+
+function showWarnings(errors) {
+  const modal = $("#errModal");
+  const list = $("#errListBody");
+  if (!modal || !list) { alert((errors || []).map((e) => `Row ${e.row}: ${e.message}`).join("\n")); return; }
+  list.innerHTML = (errors && errors.length)
+    ? errors.map((e) => `<div class="eRow"><b>Row ${esc(e.row)}</b><span>${esc(e.message)}</span></div>`).join("")
+    : `<div class="eRow"><span>No warnings — every row rendered cleanly.</span></div>`;
+  modal.classList.remove("hidden");
 }
 
 /* ---------------------------------------------------------------- Projects */
@@ -798,6 +1143,7 @@ async function saveProject() {
 async function applyConfig(cfg) {
   S.config = { ...freshConfig(), ...cfg };
   S.selected = null;
+  S.metrics = {};
   clearPreview();
   await afterConfigChange();
 }
@@ -872,6 +1218,8 @@ function bindStatic() {
   $("#btnProjects").addEventListener("click", openProjectsModal);
   $("#btnCloseModal").addEventListener("click", () => $("#modal").classList.add("hidden"));
   $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("#modal").classList.add("hidden"); });
+  $("#btnCloseErr").addEventListener("click", () => $("#errModal").classList.add("hidden"));
+  $("#errModal").addEventListener("click", (e) => { if (e.target.id === "errModal") $("#errModal").classList.add("hidden"); });
   $("#heroUploadDesign").addEventListener("click", () => $("#fileTemplate").click());
   $("#heroDemo").addEventListener("click", () => { loadDemo(); closeWelcome(true); });
 
@@ -917,6 +1265,7 @@ function bindStatic() {
     const tag = document.activeElement && document.activeElement.tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || e.metaKey || e.ctrlKey) return;
     if (e.key === "Escape") {
+      if (!$("#errModal").classList.contains("hidden")) { $("#errModal").classList.add("hidden"); return; }
       if (!$("#modal").classList.contains("hidden")) { $("#modal").classList.add("hidden"); return; }
       if (!$("#welcome").classList.contains("hidden")) { closeWelcome(false); return; }
       setMode(null); select(null); return;

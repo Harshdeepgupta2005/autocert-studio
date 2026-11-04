@@ -26,6 +26,9 @@ if [ ! -x venv/bin/python ]; then
 fi
 ./venv/bin/pip install --quiet -r requirements.txt pyinstaller
 
+# regenerate app icons when missing (electron/build is not tracked by git)
+[ -f electron/build/icon.icns ] || ./venv/bin/python gen_icons.py
+
 rm -rf build-engine/build build-engine/dist
 mkdir -p build-engine
 cd build-engine
@@ -44,7 +47,10 @@ echo
 echo "=== [4/4] Building the macOS .dmg (arm64) ==="
 cd electron
 [ -d node_modules ] || npm install --no-fund --no-audit
-CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dmg --arm64
+# prefer the offline Electron copy in vendor/ (immune to flaky downloads)
+DIST_FLAG=""
+[ -d vendor/Electron.app ] && DIST_FLAG="--config.electronDist=vendor"
+CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dmg --arm64 $DIST_FLAG
 cd ..
 
 echo
