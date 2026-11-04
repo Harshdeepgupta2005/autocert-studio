@@ -120,6 +120,11 @@ function createWindow() {
                 "document.getElementById('propsCard')?.scrollIntoView({block:'start'}); true");
               await new Promise((r) => setTimeout(r, 900));
             }
+            if (process.env.AUTOCERT_FONTS) {
+              await win.webContents.executeJavaScript(
+                "document.getElementById('pFontImport')?.click(); true");
+              await new Promise((r) => setTimeout(r, 900));
+            }
           } catch (_) { /* best effort */ }
         }
         if (process.env.AUTOCERT_ERR) {

@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -15,6 +16,18 @@ ROOT = f"http://{HOST}:{PORT}"
 def get_json(path):
     with urllib.request.urlopen(ROOT + path, timeout=30) as r:
         return json.loads(r.read())
+
+
+def post_json_status(path, payload, timeout=120):
+    """(status, parsed-json) without raising on non-200."""
+    req = urllib.request.Request(ROOT + path, method="POST",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
 
 
 def multipart(path, fpath, field="file"):
@@ -112,6 +125,34 @@ def main() -> int:
     m = post_json("/api/text-metrics?row=0", cfg | {"field": cfg["fields"][0]})
     assert m["width"] > 50 and m["height"] > 20, m
     print(f"/api/text-metrics → {m['width']}×{m['height']} for {m['text']!r}")
+
+    # real-text font serving (used by the @font-face previews)
+    with urllib.request.urlopen(ROOT + "/api/font-file?label=Arial", timeout=30) as r:
+        fdata = r.read()
+    assert fdata[:4] in (b"\x00\x01\x00\x00", b"true", b"OTTO"), fdata[:8]
+    print(f"/api/font-file → {len(fdata)//1024} KB font file ok")
+
+    # google-fonts link import (needs internet; skipped gracefully otherwise)
+    fonts_meta = get_json("/api/fonts")
+    fdir = Path(fonts_meta["dir"]) if fonts_meta.get("dir") else None
+    before = set(fdir.glob("*")) if fdir and fdir.is_dir() else set()
+    st, res = post_json_status("/api/import-font-url",
+                               {"url": "https://fonts.google.com/specimen/Poppins"})
+    if st == 200:
+        names = get_json("/api/fonts")
+        assert any("Poppins" in f for f in names["fonts"]), res
+        print(f"/api/import-font-url → {res['added']} (google link ok)")
+        fdir2 = Path(get_json("/api/fonts")["dir"])
+        after = set(fdir2.glob("*"))
+        for p in after - before:            # remove the imported test fonts again
+            p.unlink()
+        post_json("/api/fonts/refresh", {})
+        assert not any("Poppins" in f for f in get_json("/api/fonts")["fonts"])
+    else:
+        print(f"/api/import-font-url → skipped ({res.get('error', st)[:40]}…)")
+    st, res = post_json_status("/api/import-font-url", {"url": "https://example.com/x"})
+    assert st == 400 and res.get("error"), res
+    print("/api/import-font-url → bad link rejected")
 
     # fancy photo: circle shape + background removal
     fancy = json.loads(json.dumps(cfg))

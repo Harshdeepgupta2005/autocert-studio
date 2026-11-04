@@ -567,28 +567,91 @@ function seg(pairs, cur) {
     `<button type="button" data-v="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("");
 }
 
-/* ── font picker: searchable list with a live preview strip per font ── */
+/* ── font picker: searchable list with live text previews ──
+   Each font is loaded through @font-face from /api/font-file, so the
+   preview is real text: glyphs the font lacks fall back to the system
+   font automatically — no more □■ tofu boxes. Items render lazily
+   (chunks at the bottom sentinel) so hundreds of files stay fast. */
 
-function fontPreviewURL(label) {
-  return `/api/font-preview?text=${encodeURIComponent("Abc 123 · Aarav @2026")}` +
-         `&label=${encodeURIComponent(label)}`;
+const _fontFaces = new Set();
+
+function _fontHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
 }
 
-function fontItemsHTML(cur) {
-  const def = `
-    <div class="fItem${!cur ? " sel" : ""}" data-label="">
-      <div class="fDefault">— system default —</div><span class="fName">&nbsp;</span>
+function fontFamilyName(label) {
+  return "acf-" + label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+                        .replace(/^-+|-+$/g, "") + "-" + _fontHash(label);
+}
+
+function ensureFontFace(label) {
+  const fam = fontFamilyName(label);
+  if (_fontFaces.has(fam)) return fam;
+  _fontFaces.add(fam);
+  try {
+    const face = new FontFace(fam,
+      `url(/api/font-file?label=${encodeURIComponent(label)})`,
+      { display: "swap" });
+    document.fonts.add(face);     // loads when first used by rendered text
+  } catch (_) { /* very old runtime → previews stay system-styled */ }
+  return fam;
+}
+
+function fontItemHTML(f, cur) {
+  const fam = ensureFontFace(f);
+  return `
+    <div class="fItem${f === cur ? " sel" : ""}" data-label="${esc(f)}">
+      <div class="fSample" style="font-family:'${fam}',system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif">Abc 123</div>
+      <div class="fCaption">${esc(f)}</div>
     </div>`;
-  const items = S.fonts
-    .filter((f) => !S.fontFilter ||
-      f.toLowerCase().includes(S.fontFilter.toLowerCase()))
-    .map((f) => `
-      <div class="fItem${f === cur ? " sel" : ""}" data-label="${esc(f)}">
-        <img loading="lazy" src="${fontPreviewURL(f)}" alt="">
-        <span class="fName">${esc(f)}</span>
-      </div>`)
-    .join("");
-  return cur ? items + def : def + items;
+}
+
+const _FONT_CHUNK = 40;
+let _fontListCursor = 0;          // list entries consumed so far
+
+function fontCandidates() {
+  const q = S.fontFilter.trim().toLowerCase();
+  return S.fonts.filter((f) => !q || f.toLowerCase().includes(q));
+}
+
+function _fontChunkHTML(list, from, to, cur) {
+  let acc = "";
+  for (let i = from; i < to; i++) {
+    if (list[i] === cur) continue;
+    acc += fontItemHTML(list[i], cur);
+  }
+  return acc;
+}
+
+/* Keep the selected font's row pinned at the top, then the first chunk. */
+function fontListStartHTML(cur) {
+  const def = `
+    <div class="fItem fDefault${!cur ? " sel" : ""}" data-label="">
+      <div class="fSample sysDefault">— system default —</div>
+      <div class="fCaption">the app's fallback font</div>
+    </div>`;
+  const list = fontCandidates();
+  _fontListCursor = Math.min(list.length, _FONT_CHUNK);
+  const head = cur && list.includes(cur) ? fontItemHTML(cur, cur) : "";
+  const more = _fontListCursor < list.length ? `<div id="fontSentinel"></div>` : "";
+  return (cur ? "" : def) + head + _fontChunkHTML(list, 0, _fontListCursor, cur)
+       + more + (cur ? def : "");
+}
+
+/* Append the next chunk once the sentinel gets close to view. */
+function fontListMore(cur) {
+  const list = fontCandidates();
+  if (_fontListCursor >= list.length) { $("#fontSentinel")?.remove(); return; }
+  const end = Math.min(list.length, _fontListCursor + _FONT_CHUNK);
+  const acc = _fontChunkHTML(list, _fontListCursor, end, cur);
+  _fontListCursor = end;
+  const sn = $("#fontSentinel");
+  if (sn) {
+    sn.insertAdjacentHTML("beforebegin", acc);
+    if (_fontListCursor >= list.length) sn.remove();
+  }
 }
 
 function fontPickerHTML(cur) {
@@ -596,10 +659,35 @@ function fontPickerHTML(cur) {
     <div class="fontPick">
       <div class="fpTop">
         <input type="text" id="pFontSearch" placeholder="Search ${S.fonts.length} fonts…" value="${esc(S.fontFilter)}" spellcheck="false">
-        <button class="btn mini primary fpImport" id="pFontImport" title="Install .ttf / .otf files into your fonts folder">⤓ Import</button>
+        <button class="btn mini primary fpImport" id="pFontImport" title="Import more fonts from a link or files">⤓ Import</button>
       </div>
-      <div class="fontList" id="pFontList">${fontItemsHTML(cur)}</div>
+      <div class="fontList" id="pFontList">${fontListStartHTML(cur)}</div>
     </div>`;
+}
+
+function bindFontListScroll(cur) {
+  const sn = $("#fontSentinel");
+  if (!sn) return;
+  const holder = sn.closest(".fontList");
+  if ("IntersectionObserver" in window) {
+    const io = new IntersectionObserver((ents) => {
+      if (ents.some((e) => e.isIntersecting)) fontListMore(cur);
+    }, { root: holder, rootMargin: "160px" });
+    io.observe(sn);
+  } else {
+    holder?.addEventListener("scroll", () => {
+      if (!$("#fontSentinel")) return;
+      if (sn.getBoundingClientRect().bottom < holder.getBoundingClientRect().bottom + 160)
+        fontListMore(cur);
+    }, { passive: true });
+  }
+}
+
+function rerenderFontList(cur) {
+  const holder = $("#pFontList");
+  if (!holder) return;
+  holder.innerHTML = fontListStartHTML(cur);
+  bindFontListScroll(cur);
 }
 
 /* ── shared props scaffolding ── */
@@ -796,8 +884,7 @@ function buildProps() {
     if (search) {
       search.addEventListener("input", (e) => {
         S.fontFilter = e.target.value;
-        const holder = box.querySelector("#pFontList");
-        if (holder) refreshFontList(holder, f.font || "");
+        rerenderFontList(f.font || "");
         // keep focus in the search box after re-render
         const s2 = box.querySelector("#pFontSearch");
         if (s2) { s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length); }
@@ -813,8 +900,9 @@ function buildProps() {
       list.querySelectorAll(".fItem").forEach((i2) =>
         i2.classList.toggle("sel", i2.dataset.label === f.font));
     });
+    bindFontListScroll(f.font || "");
     const imp = box.querySelector("#pFontImport");
-    if (imp) imp.addEventListener("click", () => pickFontFiles());
+    if (imp) imp.addEventListener("click", () => openFontImport());
   }
   bind("#pX", "change", (e) => touch(() => { f.x = Math.round(+e.target.value || 0); }));
   bind("#pY", "change", (e) => touch(() => { f.y = Math.round(+e.target.value || 0); }));
@@ -850,9 +938,46 @@ async function uploadFonts(fileList) {
   const res = await fetch("/api/import-fonts", { method: "POST", body: fd });
   const j = await res.json().catch(() => ({ error: "Import failed" }));
   if (j.error) { toast(j.error, "error", 6000); return; }
+  afterFontImport(j);
+}
+
+async function importFontFromUrl() {
+  const urlEl = $("#fontUrl");
+  const btn = $("#btnFontUrlFetch");
+  const url = (urlEl && urlEl.value || "").trim();
+  if (!url) { toast("Paste a Google Fonts link or a direct .ttf link first.", "warn"); return; }
+  if (btn) { btn.disabled = true; btn.textContent = "⤓ Importing…"; }
+  try {
+    const res = await fetch("/api/import-font-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const j = await res.json().catch(() => ({ error: "Import failed" }));
+    if (j.error) { toast(j.error, "error", 7000); return; }
+    afterFontImport(j);
+    closeFontImport();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⤓ Download font"; }
+  }
+}
+
+function afterFontImport(j) {
   S.fonts = j.fonts || S.fonts;
-  toast(`Installed ${j.added.length} font${j.added.length === 1 ? "" : "s"}: ${j.added.join(", ")}`, "ok", 6000);
+  toast(`Installed ${j.added.length} font${j.added.length === 1 ? "" : "s"}: ${j.added.join(", ")}`, "ok", 7000);
   if (S.selected && S.selected.type === "text") buildProps();   // refresh previews
+}
+
+function openFontImport() {
+  const m = $("#fontModal");
+  if (!m) { pickFontFiles(); return; }
+  m.classList.remove("hidden");
+  const u = $("#fontUrl");
+  if (u) { u.value = ""; setTimeout(() => u.focus(), 60); }
+}
+
+function closeFontImport() {
+  $("#fontModal")?.classList.add("hidden");
 }
 
 function fillPropsXY(f) {
@@ -1220,6 +1345,18 @@ function bindStatic() {
   $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("#modal").classList.add("hidden"); });
   $("#btnCloseErr").addEventListener("click", () => $("#errModal").classList.add("hidden"));
   $("#errModal").addEventListener("click", (e) => { if (e.target.id === "errModal") $("#errModal").classList.add("hidden"); });
+  $("#btnCloseFont").addEventListener("click", closeFontImport);
+  $("#fontModal").addEventListener("click", (e) => { if (e.target.id === "fontModal") closeFontImport(); });
+  $("#btnFontUrlFetch").addEventListener("click", importFontFromUrl);
+  $("#fontUrl").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); importFontFromUrl(); }
+  });
+  $("#btnFontFiles").addEventListener("click", () => { closeFontImport(); pickFontFiles(); });
+  $$("#fontModal .chip").forEach((c) => c.addEventListener("click", () => {
+    const u = $("#fontUrl");
+    u.value = c.dataset.url;
+    u.focus();
+  }));
   $("#heroUploadDesign").addEventListener("click", () => $("#fileTemplate").click());
   $("#heroDemo").addEventListener("click", () => { loadDemo(); closeWelcome(true); });
 
@@ -1262,14 +1399,19 @@ function bindStatic() {
   window.addEventListener("resize", () => { syncOverlays(); });
 
   document.addEventListener("keydown", (e) => {
-    const tag = document.activeElement && document.activeElement.tagName;
-    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || e.metaKey || e.ctrlKey) return;
     if (e.key === "Escape") {
+      if (!$("#fontModal").classList.contains("hidden")) { $("#fontModal").classList.add("hidden"); return; }
       if (!$("#errModal").classList.contains("hidden")) { $("#errModal").classList.add("hidden"); return; }
       if (!$("#modal").classList.contains("hidden")) { $("#modal").classList.add("hidden"); return; }
       if (!$("#welcome").classList.contains("hidden")) { closeWelcome(false); return; }
-      setMode(null); select(null); return;
+      if (!(document.activeElement &&
+            ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName))) {
+        setMode(null); select(null);
+      }
+      return;
     }
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || e.metaKey || e.ctrlKey) return;
     const f = S.selected;
     if (!f) return;
     if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); deleteField(f); return; }

@@ -76,11 +76,18 @@ environment). Your browser opens at `http://localhost:7437`.
 
 ## Fonts
 
-- The font picker shows a **live preview** of every font in its own
-  handwriting (searchable list, ~370 fonts on a typical Mac).
-- **⤓ Import** installs your own `.ttf` / `.otf` / `.ttc` files: pick them and
-  they are copied into your fonts folder and appear in the list instantly
-  (also readable by the app next launch — same folder as below).
+- The font picker shows a **live preview of every font in its own lettering**
+  (searchable, ~370 fonts on a typical Mac). Previews are real text, and any
+  glyph a font lacks automatically falls back to the system font — so you
+  always see readable letters, never empty boxes.
+- **⤓ Import** opens two easy ways to add fonts:
+  - **From Google Fonts by link** — paste the font's page link, e.g.
+    `https://fonts.google.com/specimen/Poppins`, press *Download font* and the
+    app fetches the family's Regular / Bold / Italic files for you. Any direct
+    `.ttf` / `.otf` link works too. (This one action needs internet; everything
+    else stays local and your data never leaves the Mac.)
+  - **From files on this Mac** — pick `.ttf` / `.otf` / `.ttc` files, or drop
+    them straight into your fonts folder (see below).
 
 ## Tips
 
@@ -127,4 +134,5 @@ AUTOCERT_DEMO=1                  # load the built-in demo first
 AUTOCERT_SELECT=1                # select the first text field (shows properties)
 AUTOCERT_PROPS=1                 # scroll the property panel into view
 AUTOCERT_ERR=1                   # open the generation-warnings dialog
+AUTOCERT_FONTS=1                 # open the font import dialog
 ```

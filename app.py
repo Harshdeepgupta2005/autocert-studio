@@ -10,10 +10,13 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -201,7 +204,11 @@ def text_metrics():
 
 @app.get("/api/font-preview")
 def font_preview():
-    """Render 'Abc 123' in the requested font as a small PNG strip."""
+    """Render sample text in the requested font as a small PNG strip.
+
+    The default sample avoids symbols (@, ·, …) that many display fonts
+    lack; the UI itself now shows real text previews via /api/font-file.
+    """
     label = request.args.get("label", "")
     text = (request.args.get("text") or "Abc 123")[:28]
     path = renderer.font_path(label)
@@ -255,6 +262,186 @@ def fonts_refresh():
     """Re-scan font folders (also after removing files manually)."""
     renderer.refresh_fonts()
     return {"fonts": renderer.font_labels()}
+
+
+@app.get("/api/font-file")
+def font_file():
+    """Serve a font file so the UI can show real text previews (@font-face)."""
+    label = request.args.get("label", "")
+    path = renderer.font_path(label)
+    if not path:
+        return jsonify(error="unknown font"), 404
+    p = Path(path)
+    mime = {".ttf": "font/ttf", ".otf": "font/otf", ".ttc": "font/collection"} \
+        .get(p.suffix.lower(), "font/ttf")
+    resp = send_file(p, mimetype=mime)
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+
+
+# --------------------------------------------- import fonts from a link ---
+
+_GOOGLE_HOSTS = ("fonts.google.com", "fonts.googleapis.com", "fonts.gstatic.com")
+_GOOGLE_UA = "Mozilla/4.0 (compatible; AutoCertStudio)"   # legacy css API → TTF urls
+_FONT_URL_TIMEOUT = 30
+_MAX_LINK_FONTS = 12                                      # safety cap per import
+
+
+def _ssl_context():
+    """TLS context with a CA bundle that exists on every machine.
+
+    Some Python installs (notably python.org builds on macOS) ship without
+    system-CA wiring; certifi travels with the app, so HTTPS font imports
+    just work.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _ssl_context()
+
+
+def _url_fetch(url: str):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _GOOGLE_UA,
+                      "Accept": "*/*", "Connection": "close"})
+    with urllib.request.urlopen(req, timeout=_FONT_URL_TIMEOUT, context=_SSL_CTX) as r:
+        return r.read()
+
+
+def _font_ext_for(data: bytes, name: str) -> str:
+    """Extension by magic bytes, falling back to the URL/file name."""
+    if data[:4] == b"OTTO":
+        return ".otf"
+    if data[:4] in (b"\x00\x01\x00\x00", b"true", b"ttcf"):
+        return ".ttf"
+    return Path(urllib.parse.urlparse(name).path).suffix.lower()
+
+
+def _google_family_and_styles(url: str):
+    """Extract a family name from a Google Fonts link/served css URL."""
+    parts = urllib.parse.urlparse(url)
+    q = urllib.parse.parse_qs(parts.query)
+    if "family" in q:                                   # css / css2 with ?family=
+        fam = q["family"][0]
+        fam = fam.split(":")[0].strip("+ ").replace("+", " ")
+        return fam or None, []
+    if parts.hostname and parts.hostname.endswith("fonts.google.com"):
+        seg = [s for s in parts.path.split("/") if s]     # /specimen/Poppins
+        if seg:
+            fam = urllib.parse.unquote(seg[-1]).replace("+", " ").strip()
+            if fam:
+                return fam, []
+    return None, []
+
+
+def _css_ttf_urls(css: bytes):
+    """(url, weight, italic) for every truetype src in a Google css response."""
+    out = []
+    try:
+        text = css.decode("utf-8", "replace")
+    except Exception:
+        return out
+    for block in text.split("@font-face")[1:]:
+        m = re.search(r"url\((https://[^)\s]+)\)", block)
+        if not m:
+            continue
+        w = re.search(r"font-weight:\s*([\w ]+);", block)
+        style_italic = bool(re.search(r"font-style:\s*italic", block))
+        try:
+            weight = int((w.group(1) if w else "400").strip() or 400)
+        except ValueError:
+            weight = 400
+        out.append((m.group(1), weight, style_italic))
+    return out
+
+
+def _style_suffix(weight: int, italic: bool) -> str:
+    if italic and weight in (400, 500):
+        return " Italic"
+    if italic:
+        return f" {weight} Italic"
+    return "" if weight == 400 else f" {weight}"
+
+
+def _save_font_bytes(data: bytes, base_name: str, ext: str, added: list) -> None:
+    ext = ext if ext in renderer.FONT_EXTS else ".ttf"
+    safe = re.sub(r"[^\w\-. ()]+", "_", base_name).strip(" _") or "ImportedFont"
+    dest = FONTS_DIR / (safe + ext)
+    ix = 2
+    while dest.exists() and dest.stat().st_size != len(data):
+        dest = FONTS_DIR / f"{safe} ({ix}){ext}"
+        ix += 1
+    dest.write_bytes(data)
+    added.append({"file": dest.name, "label": dest.stem.replace("_", " ").strip()})
+
+
+def _import_font_from_url(url: str):
+    """Download font(s) from a Google Fonts page/link or any direct font URL.
+
+    Returns (added_files, warning). Raises urlopen errors to the caller.
+    """
+    added: list[dict] = []
+    host = urllib.parse.urlparse(url).hostname or ""
+    path = urllib.parse.urlparse(url).path or ""
+
+    # 1) direct .ttf/.otf/.ttc link (any server)
+    if not host.endswith(_GOOGLE_HOSTS[0]) and \
+            Path(path).suffix.lower() in renderer.FONT_EXTS:
+        data = _url_fetch(url)
+        name = urllib.parse.unquote(Path(path).name) or "Font.ttf"
+        _save_font_bytes(data, Path(name).stem, Path(name).suffix.lower(), added)
+        return added, ""
+
+    # 2) Google Fonts: derive the family, fetch the legacy css API (always TTF)
+    fam, _guessed = _google_family_and_styles(url)
+    if not fam:
+        return [], "That does not look like a Google Fonts link or a .ttf/.otf file. " \
+                   "Try https://fonts.google.com/specimen/Poppins"
+    seen_urls: set[str] = set()
+    for variant in ("", ":700", ":i", ":700i"):        # regular · bold · italic · bold-italic
+        try:
+            css_url = ("https://fonts.googleapis.com/css?family="
+                       + urllib.parse.quote_plus(fam) + variant)
+            for u, weight, italic in _css_ttf_urls(_url_fetch(css_url)):
+                if u in seen_urls:
+                    continue
+                seen_urls.add(u)
+                if len(added) >= _MAX_LINK_FONTS:
+                    break
+                data = _url_fetch(u)
+                ext = _font_ext_for(data, u)
+                _save_font_bytes(data, fam + _style_suffix(weight, italic), ext, added)
+            if added:
+                pass                       # keep trying richer variants below too
+        except Exception:
+            continue                       # a missing style simply contributes nothing
+    return added, "" if added else \
+        f"Google reported no downloadable files for “{fam}”."
+
+
+@app.post("/api/import-font-url")
+def import_font_url():
+    """Import fonts from a Google Fonts link or any direct .ttf/.otf URL."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify(error="Paste a font link first."), 400
+    if not (url.startswith("http://") or url.startswith("https://")):
+        url = "https://" + url
+    try:
+        added, warning = _import_font_from_url(url)
+    except Exception as e:
+        return jsonify(error=f"Could not download the font: {e}"), 400
+    if not added:
+        return jsonify(error=warning or "No font files found at that link."), 400
+    renderer.refresh_fonts()
+    return {"added": [a["label"] for a in added],
+            "files": [a["file"] for a in added],
+            "fonts": renderer.font_labels()}
 
 
 # -------------------------------------------------------------- generate ---

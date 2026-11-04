@@ -203,6 +203,41 @@
   </div>
 </div>
 
+<div id="fontModal" class="hidden">
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="Import fonts">
+    <div class="sheetHead"><b>⤓ Import fonts</b><button class="btn mini" id="btnCloseFont" title="Close" aria-label="Close">✕</button></div>
+    <p class="impNote">Your data stays on this Mac — importing only contacts the
+      font's download source. Installed fonts stay available in every project.</p>
+
+    <div class="impSection">
+      <div class="secLabel" style="margin-top:2px">From Google Fonts by link</div>
+      <input type="url" id="fontUrl" spellcheck="false"
+             placeholder="https://fonts.google.com/specimen/Poppins"
+             style="margin-bottom:8px">
+      <div class="chips">
+        <span class="chipLabel">Try:</span>
+        <button type="button" class="chip" data-url="https://fonts.google.com/specimen/Poppins">Poppins</button>
+        <button type="button" class="chip" data-url="https://fonts.google.com/specimen/Montserrat">Montserrat</button>
+        <button type="button" class="chip" data-url="https://fonts.google.com/specimen/Great%20Vibes">Great Vibes</button>
+        <button type="button" class="chip" data-url="https://fonts.google.com/specimen/Playfair%20Display">Playfair Display</button>
+      </div>
+      <div class="hint">Paste the font's page link from <b>fonts.google.com</b> —
+        the app downloads Regular, Bold and Italics when the family has them.
+        A direct link to any <b>.ttf / .otf</b> file works too.</div>
+      <button class="btn primary" id="btnFontUrlFetch" style="margin-top:10px">⤓ Download font</button>
+    </div>
+
+    <div class="impSep"><span>or</span></div>
+
+    <div class="impSection">
+      <div class="secLabel" style="margin-top:2px">From files on this Mac</div>
+      <button class="btn" id="btnFontFiles">📂 Choose .ttf / .otf / .ttc files…</button>
+      <div class="hint">You can also drop font files straight into your fonts folder —
+        see <b>? Guide</b> » Fonts.</div>
+    </div>
+  </div>
+</div>
+
 <div id="welcome" class="hidden">
   <div class="sheet welcomeSheet" role="dialog" aria-modal="true" aria-label="Welcome guide">
     <div class="wHead"><div class="wLogo">🎓</div>
